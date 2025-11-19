@@ -12,7 +12,11 @@ Think of it as your automation cookbook: pick a recipe, follow the spec, customi
 
 ## What's inside?
 
-### 4 Reusable Subflows
+This repository contains two major components:
+
+### 1. n8n Workflow Blueprints
+
+**4 Reusable Subflows**
 
 Building blocks you can plug into any workflow:
 
@@ -21,7 +25,7 @@ Building blocks you can plug into any workflow:
 - **notification-dispatch** — Standard notifications via Slack/email with severity levels
 - **audit-log** — Simple event logging to sheets/databases for workflow tracking
 
-### 10 Core Workflows
+**10 Core Workflows**
 
 End-to-end automation patterns for common business needs:
 
@@ -35,6 +39,18 @@ End-to-end automation patterns for common business needs:
 8. **LinkedIn Lead Organizer** — Score and prioritize exported LinkedIn leads (ToS-safe)
 9. **Proposal & Followup Automation** — Never forget to follow up on proposals
 10. **Sponsorship Local Research Helper** — Score potential sponsors for local orgs
+
+### 2. Automation Encyclopedia
+
+**[`encyclopedia/`](encyclopedia/)** — A comprehensive reference library of **218+ automation ideas** across 10 business domains.
+
+Use the encyclopedia for:
+- **Client discovery** — Identify automation opportunities during initial calls
+- **Proposal building** — Bundle multiple automations into packages
+- **Ideation** — Avoid blank page syndrome when designing new workflows
+- **Cross-reference** — Find similar patterns when facing new problems
+
+The encyclopedia is **tool-agnostic** (works with any automation platform), while the workflow blueprints are **n8n-specific** implementations. Together they provide both broad ideas and detailed execution plans.
 
 ## How to use this repo
 
