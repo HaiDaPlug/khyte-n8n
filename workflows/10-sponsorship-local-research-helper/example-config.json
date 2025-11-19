@@ -1,0 +1,214 @@
+{
+  "name": "Sponsorship Local Research Helper",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 9 * * 1"}]
+        }
+      },
+      "name": "Every Monday at 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "return {\n  searchConfig: {\n    location: {\n      city: process.env.TARGET_CITY || 'Borås',\n      region: 'Västra Götaland',\n      country: 'Sweden',\n      radius: 50,\n      coordinates: {\n        lat: 57.7210,\n        lng: 12.9401\n      }\n    },\n    dateRange: {\n      start: new Date(),\n      end: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000)\n    },\n    eventTypes: ['business networking', 'tech meetup', 'startup event'],\n    sponsorshipBudget: {\n      min: 5000,\n      max: 50000\n    }\n  },\n  searchTimestamp: new Date().toISOString(),\n  searchId: `research-${Date.now()}`\n};"
+      },
+      "name": "Define Search Parameters",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.eventbriteapi.com/v3/events/search/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "location.latitude", "value": "={{ $json.searchConfig.location.coordinates.lat }}"},
+            {"name": "location.longitude", "value": "={{ $json.searchConfig.location.coordinates.lng }}"},
+            {"name": "location.within", "value": "={{ $json.searchConfig.location.radius }}km"},
+            {"name": "q", "value": "business OR networking OR tech"}
+          ]
+        }
+      },
+      "name": "Search Eventbrite",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/customsearch/v1",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "key", "value": "={{ $env.GOOGLE_SEARCH_API_KEY }}"},
+            {"name": "cx", "value": "={{ $env.GOOGLE_SEARCH_ENGINE_ID }}"},
+            {"name": "q", "value": "={{ $json.searchConfig.location.city }} business events"},
+            {"name": "num", "value": "10"}
+          ]
+        }
+      },
+      "name": "Search Google",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const eventbriteEvents = $('Search Eventbrite').item?.json.events || [];\nconst googleResults = $('Search Google').item?.json.items || [];\n\nconst allOpportunities = [\n  ...eventbriteEvents.map(event => ({\n    source: 'eventbrite',\n    type: 'event',\n    name: event.name?.text || event.name,\n    description: event.description?.text || '',\n    url: event.url,\n    startDate: event.start?.local,\n    organizer: event.organizer?.name\n  })),\n  ...googleResults.map(result => ({\n    source: 'google',\n    type: 'search_result',\n    name: result.title,\n    description: result.snippet,\n    url: result.link\n  }))\n];\n\nconst seen = new Set();\nconst deduplicated = allOpportunities.filter(opp => {\n  const key = opp.url || opp.name.toLowerCase();\n  if (seen.has(key)) return false;\n  seen.add(key);\n  return true;\n});\n\nreturn {\n  opportunities: deduplicated,\n  totalFound: deduplicated.length\n};"
+      },
+      "name": "Aggregate and Deduplicate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 250]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "name": "Split Opportunities",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1050, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "const opportunity = $input.item.json;\nconst searchConfig = $('Define Search Parameters').item.json.searchConfig;\n\nconst prompt = `Evaluate this sponsorship opportunity.\n\n**Opportunity:** ${opportunity.name}\n**Description:** ${opportunity.description}\n**Type:** ${opportunity.type}\n\n**Your Business:** Automation consulting, target: SMBs, location: ${searchConfig.location.city}\n**Budget:** ${searchConfig.sponsorshipBudget.min}-${searchConfig.sponsorshipBudget.max} SEK\n\nReturn JSON:\n{\n  \"fitScore\": 1-10,\n  \"fitReason\": \"Why this score\",\n  \"audienceAlignment\": \"excellent|good|moderate|poor\",\n  \"expectedROI\": {\n    \"brandAwareness\": \"high|medium|low\",\n    \"leadGeneration\": \"high|medium|low\"\n  },\n  \"suggestedBudget\": number (SEK),\n  \"outreachStrategy\": \"How to approach\",\n  \"priority\": \"high|medium|low\"\n}`;\n\nreturn {\n  prompt,\n  opportunity\n};"
+      },
+      "name": "Build Evaluation Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 250]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Evaluation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1450, 250]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1650, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "const evaluation = $input.item.json.outputJson;\nconst opportunity = $('Build Evaluation Prompt').item.json.opportunity;\n\nreturn {\n  ...opportunity,\n  fitScore: evaluation.fitScore,\n  fitReason: evaluation.fitReason,\n  audienceAlignment: evaluation.audienceAlignment,\n  expectedROI: evaluation.expectedROI,\n  suggestedBudget: evaluation.suggestedBudget,\n  outreachStrategy: evaluation.outreachStrategy,\n  priority: evaluation.priority,\n  evaluatedAt: new Date().toISOString(),\n  status: 'evaluated'\n};"
+      },
+      "name": "Extract Evaluation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 200]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData"
+      },
+      "name": "Aggregate All Opportunities",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2050, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "const opportunities = $input.all();\n\nconst highPriority = opportunities.filter(o => o.json.priority === 'high' && o.json.fitScore >= 7);\nconst mediumPriority = opportunities.filter(o => o.json.priority === 'medium' || (o.json.fitScore >= 4 && o.json.fitScore < 7));\nconst lowPriority = opportunities.filter(o => o.json.priority === 'low' || o.json.fitScore < 4);\n\nreturn {\n  highPriority,\n  mediumPriority,\n  lowPriority,\n  summary: {\n    total: opportunities.length,\n    high: highPriority.length,\n    medium: mediumPriority.length,\n    low: lowPriority.length,\n    totalBudgetNeeded: highPriority.reduce((sum, o) => sum + (o.json.suggestedBudget || 0), 0)\n  }\n};"
+      },
+      "name": "Filter by Priority",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2250, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { highPriority, summary } = $input.item.json;\nconst searchConfig = $('Define Search Parameters').item.json.searchConfig;\n\nconst report = `# Sponsorship Research Report\\n${searchConfig.location.city} - ${new Date().toLocaleDateString()}\\n\\n## Summary\\n\\n**Opportunities found:** ${summary.total}\\n- High priority: ${summary.high}\\n- Estimated budget: ${summary.totalBudgetNeeded.toLocaleString()} SEK\\n\\n## High Priority Opportunities\\n\\n${highPriority.map((opp, i) => `### ${i + 1}. ${opp.json.name}\\n\\n**Fit Score:** ${opp.json.fitScore}/10\\n**Why:** ${opp.json.fitReason}\\n**Budget:** ${opp.json.suggestedBudget.toLocaleString()} SEK\\n**Outreach:** ${opp.json.outreachStrategy}\\n**Link:** ${opp.json.url}\\n\\n---`).join('\\n')}\\n\\n*Generated automatically*`;\n\nreturn {\n  report,\n  reportTitle: `Sponsorship Research - ${searchConfig.location.city} - ${new Date().toLocaleDateString()}`,\n  summary\n};"
+      },
+      "name": "Build Research Report",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2450, 250]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "title": "={{ $json.reportTitle }}",
+        "bodyContent": "={{ $json.report }}",
+        "options": {
+          "folderId": "={{ $env.SPONSORSHIP_RESEARCH_FOLDER_ID }}"
+        }
+      },
+      "name": "Save Report to Docs",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 1,
+      "position": [2650, 250]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.SPONSORSHIP_DATABASE_SHEET_ID }}",
+        "range": "Opportunities!A:Z",
+        "options": {}
+      },
+      "name": "Write to Database",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2850, 250]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Weekly Digest",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3050, 250]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3250, 250]
+    }
+  ],
+  "connections": {
+    "Every Monday at 9am": {"main": [[{"node": "Define Search Parameters", "type": "main", "index": 0}]]},
+    "Define Search Parameters": {"main": [[{"node": "Search Eventbrite", "type": "main", "index": 0}, {"node": "Search Google", "type": "main", "index": 0}]]},
+    "Search Eventbrite": {"main": [[{"node": "Aggregate and Deduplicate", "type": "main", "index": 0}]]},
+    "Search Google": {"main": [[{"node": "Aggregate and Deduplicate", "type": "main", "index": 1}]]},
+    "Aggregate and Deduplicate": {"main": [[{"node": "Split Opportunities", "type": "main", "index": 0}]]},
+    "Split Opportunities": {"main": [[{"node": "Build Evaluation Prompt", "type": "main", "index": 0}]]},
+    "Build Evaluation Prompt": {"main": [[{"node": "Call AI for Evaluation", "type": "main", "index": 0}]]},
+    "Call AI for Evaluation": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Extract Evaluation", "type": "main", "index": 0}]]},
+    "Extract Evaluation": {"main": [[{"node": "Aggregate All Opportunities", "type": "main", "index": 0}]]},
+    "Aggregate All Opportunities": {"main": [[{"node": "Filter by Priority", "type": "main", "index": 0}]]},
+    "Filter by Priority": {"main": [[{"node": "Build Research Report", "type": "main", "index": 0}]]},
+    "Build Research Report": {"main": [[{"node": "Save Report to Docs", "type": "main", "index": 0}]]},
+    "Save Report to Docs": {"main": [[{"node": "Write to Database", "type": "main", "index": 0}]]},
+    "Write to Database": {"main": [[{"node": "Send Weekly Digest", "type": "main", "index": 0}]]},
+    "Send Weekly Digest": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

@@ -1,0 +1,243 @@
+{
+  "name": "Notification Dispatch",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "When Called",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "severity",
+              "value": "={{ $json.severity }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $json.message }}"
+            },
+            {
+              "name": "workflowName",
+              "value": "={{ $json.workflowName || '' }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $now.toISO() }}"
+            }
+          ],
+          "object": [
+            {
+              "name": "context",
+              "value": "={{ $json.context || {} }}"
+            }
+          ],
+          "array": [
+            {
+              "name": "channels",
+              "value": "={{ $json.channels || ['slack'] }}"
+            }
+          ]
+        }
+      },
+      "name": "Set Input Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { severity, message, context, workflowName, timestamp } = $input.item.json;\n\nconst severityIcons = {\n  info: '🔵',\n  warning: '⚠️',\n  error: '🔴'\n};\n\nconst colors = {\n  info: '#36a64f',\n  warning: '#ff9900',\n  error: '#ff0000'\n};\n\nlet text = `${severityIcons[severity] || '🔵'} ${severity.toUpperCase()}: ${message}`;\n\nif (workflowName) {\n  text += `\\n✉️ ${workflowName}`;\n}\n\ntext += '\\n───────────────';\n\nif (context && Object.keys(context).length > 0) {\n  for (const [key, value] of Object.entries(context)) {\n    text += `\\n${key}: ${value}`;\n  }\n}\n\nreturn {\n  slackPayload: {\n    text,\n    attachments: [{\n      color: colors[severity] || colors.info,\n      footer: `Sent at ${timestamp}`,\n      ts: Math.floor(Date.now() / 1000)\n    }]\n  },\n  channels: $input.item.json.channels\n};"
+      },
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { severity, message, context, workflowName, timestamp } = $('Set Input Parameters').item.json;\n\nconst subject = `[${severity.toUpperCase()}] ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}${workflowName ? ' - ' + workflowName : ''}`;\n\nlet body = `Workflow: ${workflowName || 'N/A'}\\n`;\nbody += `Severity: ${severity}\\n`;\nbody += `Time: ${timestamp}\\n\\n`;\nbody += `Message:\\n${message}\\n\\n`;\n\nif (context && Object.keys(context).length > 0) {\n  body += `Details:\\n`;\n  for (const [key, value] of Object.entries(context)) {\n    body += `- ${key}: ${value}\\n`;\n  }\n}\n\nreturn {\n  emailSubject: subject,\n  emailBody: body,\n  channels: $input.item.json.channels\n};"
+      },
+      "name": "Format Email Message",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.channels.includes('slack') }}",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "name": "Should Send Slack?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.channels.includes('email') }}",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "name": "Should Send Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($('Format Slack Message').item.json.slackPayload) }}",
+        "options": {}
+      },
+      "name": "Send Slack Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1050, 100],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL || 'notifications@khyte.se' }}",
+        "toEmail": "={{ $env.NOTIFICATION_EMAIL }}",
+        "subject": "={{ $('Format Email Message').item.json.emailSubject }}",
+        "emailType": "text",
+        "message": "={{ $('Format Email Message').item.json.emailBody }}"
+      },
+      "name": "Send Email Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1050, 500],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "// Collect results from both notification paths\nconst inputParams = $('Set Input Parameters').item.json;\nconst channels = inputParams.channels;\n\nconst deliveryResults = {};\nconst failedChannels = [];\n\n// Check Slack result if attempted\nif (channels.includes('slack')) {\n  try {\n    const slackNode = $('Send Slack Notification');\n    if (slackNode) {\n      const result = slackNode.item?.json;\n      const success = result?.statusCode === 200 || result?.ok === 'ok';\n      deliveryResults.slack = {\n        success,\n        timestamp: new Date().toISOString()\n      };\n      if (!success) failedChannels.push('slack');\n    }\n  } catch (e) {\n    // Slack was not sent\n  }\n}\n\n// Check Email result if attempted\nif (channels.includes('email')) {\n  try {\n    const emailNode = $('Send Email Notification');\n    if (emailNode) {\n      const result = emailNode.item?.json;\n      const success = !result?.error;\n      deliveryResults.email = {\n        success,\n        timestamp: new Date().toISOString()\n      };\n      if (!success) failedChannels.push('email');\n    }\n  } catch (e) {\n    // Email was not sent\n  }\n}\n\nconst notified = Object.values(deliveryResults).some(r => r.success);\n\nreturn {\n  notified,\n  channels: Object.keys(deliveryResults),\n  deliveryResults,\n  failedChannels,\n  originalMessage: inputParams.message,\n  severity: inputParams.severity\n};"
+      },
+      "name": "Collect Delivery Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Set Input Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Input Parameters": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Format Email Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Should Send Slack?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Email Message": {
+      "main": [
+        [
+          {
+            "node": "Should Send Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Send Slack?": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Send Email?": {
+      "main": [
+        [
+          {
+            "node": "Send Email Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Slack Notification": {
+      "main": [
+        [
+          {
+            "node": "Collect Delivery Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email Notification": {
+      "main": [
+        [
+          {
+            "node": "Collect Delivery Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1",
+  "id": "notification-dispatch-subflow",
+  "meta": {
+    "instanceId": "khyte-n8n-subflow"
+  },
+  "tags": []
+}

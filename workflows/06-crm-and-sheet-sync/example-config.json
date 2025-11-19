@@ -1,0 +1,203 @@
+{
+  "name": "CRM and Sheet Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "*/30 * * * *"}]
+        }
+      },
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "return {\n  syncConfig: {\n    direction: 'bidirectional',\n    conflictResolution: 'newest_wins',\n    uniqueIdField: {\n      crm: 'email',\n      sheet: 'Email'\n    },\n    fieldMappings: {\n      'email': 'Email',\n      'firstname': 'First Name',\n      'lastname': 'Last Name',\n      'company': 'Company',\n      'phone': 'Phone',\n      'lifecyclestage': 'Stage'\n    }\n  },\n  syncRunId: `sync-${Date.now()}`,\n  startTime: new Date().toISOString()\n};"
+      },
+      "name": "Load Sync Configuration",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "sheetId": "={{ $env.SYNC_METADATA_SHEET_ID }}",
+        "range": "sync_log!A:C"
+      },
+      "name": "Get Last Sync Timestamp",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const lastSyncData = $input.all();\nconst lastSyncTimestamp = lastSyncData[lastSyncData.length - 1]?.json.timestamp || new Date(Date.now() - 86400000).toISOString();\n\nreturn {\n  lastSyncTimestamp,\n  isFirstSync: lastSyncData.length === 0\n};"
+      },
+      "name": "Parse Last Sync",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "resource": "contact",
+        "filters": {
+          "hs_lastmodifieddate__gte": "={{ $('Parse Last Sync').item.json.lastSyncTimestamp }}"
+        },
+        "additionalFields": {
+          "properties": ["email", "firstname", "lastname", "company", "phone", "lifecyclestage", "hs_lastmodifieddate"]
+        }
+      },
+      "name": "Fetch Updated CRM Records",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "sheetId": "={{ $env.CONTACTS_SHEET_ID }}",
+        "range": "Sheet1!A:Z"
+      },
+      "name": "Fetch All Sheet Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const crmRecords = $('Fetch Updated CRM Records').all();\nconst sheetRows = $('Fetch All Sheet Rows').all();\nconst syncConfig = $('Load Sync Configuration').item.json.syncConfig;\n\nconst mappedRecords = crmRecords.map(record => {\n  const crmData = record.json;\n  const mappedRow = {};\n  \n  Object.entries(syncConfig.fieldMappings).forEach(([crmField, sheetColumn]) => {\n    mappedRow[sheetColumn] = crmData.properties?.[crmField] || '';\n  });\n  \n  return {\n    crmId: crmData.id,\n    uniqueId: crmData.properties.email,\n    mappedRow,\n    crmTimestamp: crmData.properties.hs_lastmodifieddate\n  };\n});\n\nconst sheetLookup = {};\nsheetRows.forEach(row => {\n  const uniqueId = row.json.Email;\n  if (uniqueId) {\n    sheetLookup[uniqueId] = {\n      rowNumber: row.json.rowNumber,\n      data: row.json\n    };\n  }\n});\n\nreturn {\n  mappedRecords,\n  sheetLookup\n};"
+      },
+      "name": "Map CRM to Sheet Format",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { mappedRecords, sheetLookup } = $input.item.json;\n\nconst toCreate = [];\nconst toUpdate = [];\n\nmappedRecords.forEach(record => {\n  const existingRow = sheetLookup[record.uniqueId];\n  \n  if (!existingRow) {\n    toCreate.push(record);\n  } else {\n    toUpdate.push({\n      ...record,\n      rowNumber: existingRow.rowNumber\n    });\n  }\n});\n\nreturn {\n  toCreate,\n  toUpdate,\n  summary: {\n    toCreate: toCreate.length,\n    toUpdate: toUpdate.length\n  }\n};"
+      },
+      "name": "Determine Actions",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1450, 250]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "name": "Split New Records",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1650, 150]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.CONTACTS_SHEET_ID }}",
+        "range": "Sheet1!A:Z",
+        "options": {}
+      },
+      "name": "Create Rows in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1850, 150]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "name": "Split Updates",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1650, 250]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "sheetId": "={{ $env.CONTACTS_SHEET_ID }}",
+        "range": "Sheet1!A={{ $json.rowNumber }}:Z={{ $json.rowNumber }}",
+        "options": {}
+      },
+      "name": "Update Rows in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1850, 250]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData"
+      },
+      "name": "Aggregate Sync Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const summary = $('Determine Actions').item.json.summary;\n\nreturn {\n  totalChanges: summary.toCreate + summary.toUpdate,\n  crmToSheet: {\n    created: summary.toCreate,\n    updated: summary.toUpdate\n  },\n  syncRunId: $('Load Sync Configuration').item.json.syncRunId,\n  completedAt: new Date().toISOString()\n};"
+      },
+      "name": "Build Sync Summary",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2250, 200]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.SYNC_METADATA_SHEET_ID }}",
+        "range": "sync_log!A:D",
+        "options": {}
+      },
+      "name": "Update Last Sync Timestamp",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Sync Summary",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2650, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2850, 200]
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": {"main": [[{"node": "Load Sync Configuration", "type": "main", "index": 0}]]},
+    "Load Sync Configuration": {"main": [[{"node": "Get Last Sync Timestamp", "type": "main", "index": 0}]]},
+    "Get Last Sync Timestamp": {"main": [[{"node": "Parse Last Sync", "type": "main", "index": 0}]]},
+    "Parse Last Sync": {"main": [[{"node": "Fetch Updated CRM Records", "type": "main", "index": 0}, {"node": "Fetch All Sheet Rows", "type": "main", "index": 0}]]},
+    "Fetch Updated CRM Records": {"main": [[{"node": "Map CRM to Sheet Format", "type": "main", "index": 0}]]},
+    "Fetch All Sheet Rows": {"main": [[{"node": "Map CRM to Sheet Format", "type": "main", "index": 1}]]},
+    "Map CRM to Sheet Format": {"main": [[{"node": "Determine Actions", "type": "main", "index": 0}]]},
+    "Determine Actions": {"main": [[{"node": "Split New Records", "type": "main", "index": 0}, {"node": "Split Updates", "type": "main", "index": 0}]]},
+    "Split New Records": {"main": [[{"node": "Create Rows in Sheet", "type": "main", "index": 0}]]},
+    "Create Rows in Sheet": {"main": [[{"node": "Aggregate Sync Results", "type": "main", "index": 0}]]},
+    "Split Updates": {"main": [[{"node": "Update Rows in Sheet", "type": "main", "index": 0}]]},
+    "Update Rows in Sheet": {"main": [[{"node": "Aggregate Sync Results", "type": "main", "index": 0}]]},
+    "Aggregate Sync Results": {"main": [[{"node": "Build Sync Summary", "type": "main", "index": 0}]]},
+    "Build Sync Summary": {"main": [[{"node": "Update Last Sync Timestamp", "type": "main", "index": 0}]]},
+    "Update Last Sync Timestamp": {"main": [[{"node": "Send Sync Summary", "type": "main", "index": 0}]]},
+    "Send Sync Summary": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

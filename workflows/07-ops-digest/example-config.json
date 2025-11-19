@@ -1,0 +1,215 @@
+{
+  "name": "Ops Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 8 * * *"}]
+        }
+      },
+      "name": "Daily at 8am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date();\nconst windowEnd = now;\nconst windowStart = new Date(now);\nwindowStart.setDate(now.getDate() - 1);\n\nreturn {\n  current: {\n    start: windowStart.toISOString(),\n    end: windowEnd.toISOString(),\n    label: windowStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })\n  },\n  timestamp: now.toISOString()\n};"
+      },
+      "name": "Calculate Time Window",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.uptimerobot.com/v2/getMonitors",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {"name": "api_key", "value": "={{ $env.UPTIMEROBOT_API_KEY }}"},
+            {"name": "format", "value": "json"},
+            {"name": "logs", "value": "1"}
+          ]
+        }
+      },
+      "name": "Fetch Server Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://sentry.io/api/0/projects/={{ $env.SENTRY_ORG }}/={{ $env.SENTRY_PROJECT }}/issues/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "query", "value": "is:unresolved"},
+            {"name": "statsPeriod", "value": "24h"}
+          ]
+        }
+      },
+      "name": "Fetch Error Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://={{ $env.ZENDESK_SUBDOMAIN }}.zendesk.com/api/v2/search.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "query", "value": "type:ticket created>={{ $('Calculate Time Window').item.json.current.start }}"}
+          ]
+        }
+      },
+      "name": "Fetch Support Tickets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "const monitors = $input.item.json.monitors || [];\nconst upMonitors = monitors.filter(m => m.status === 2).length;\nconst downMonitors = monitors.filter(m => m.status === 8 || m.status === 9).length;\n\nreturn {\n  section: 'infrastructure',\n  totalMonitors: monitors.length,\n  upMonitors,\n  downMonitors,\n  incidentCount: downMonitors\n};"
+      },
+      "name": "Process Infrastructure Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const issues = $input.all();\nconst totalErrors = issues.reduce((sum, issue) => sum + parseInt(issue.json.count || 0), 0);\nconst criticalErrors = issues.filter(issue => issue.json.level === 'error').length;\n\nreturn {\n  section: 'errors',\n  totalErrors,\n  uniqueIssues: issues.length,\n  criticalErrors\n};"
+      },
+      "name": "Process Error Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const tickets = $input.item.json.results || [];\nconst newTickets = tickets.filter(t => t.status === 'new').length;\nconst openTickets = tickets.filter(t => t.status === 'open').length;\n\nreturn {\n  section: 'support',\n  totalTickets: tickets.length,\n  newTickets,\n  openTickets\n};"
+      },
+      "name": "Process Support Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Merge All Sections",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const sections = $input.all();\nconst infrastructure = sections.find(s => s.json.section === 'infrastructure')?.json;\nconst errors = sections.find(s => s.json.section === 'errors')?.json;\nconst support = sections.find(s => s.json.section === 'support')?.json;\n\nconst anomalies = [];\nconst criticalIssues = [];\n\nif (infrastructure?.downMonitors > 0) {\n  criticalIssues.push({\n    severity: 'critical',\n    area: 'Infrastructure',\n    issue: `${infrastructure.downMonitors} monitor(s) down`\n  });\n}\n\nif (errors?.totalErrors > 100) {\n  anomalies.push({\n    area: 'Errors',\n    metric: 'Total errors',\n    value: errors.totalErrors,\n    threshold: 100\n  });\n}\n\nreturn {\n  hasCriticalIssues: criticalIssues.length > 0,\n  criticalIssues,\n  anomalies,\n  allSections: sections.map(s => s.json)\n};"
+      },
+      "name": "Detect Anomalies",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { allSections, anomalies, criticalIssues } = $input.item.json;\nconst infrastructure = allSections.find(s => s.section === 'infrastructure');\nconst errors = allSections.find(s => s.section === 'errors');\nconst support = allSections.find(s => s.section === 'support');\n\nconst prompt = `Analyze this operational data and provide insights.\n\n**Infrastructure:** ${infrastructure?.upMonitors}/${infrastructure?.totalMonitors} monitors up\n**Errors:** ${errors?.totalErrors} total, ${errors?.criticalErrors} critical\n**Support:** ${support?.newTickets} new tickets, ${support?.openTickets} open\n\nProvide JSON:\n{\n  \"executiveSummary\": \"2-3 sentence overview\",\n  \"keyInsights\": [\"insight 1\", \"insight 2\"],\n  \"recommendedActions\": [\"action 1\", \"action 2\"],\n  \"overallStatus\": \"healthy|concerning|critical\"\n}`;\n\nreturn {\n  prompt,\n  allSections,\n  anomalies,\n  criticalIssues\n};"
+      },
+      "name": "Build AI Insights Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Insights",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const aiInsights = $input.item.json.outputJson;\nconst data = $('Detect Anomalies').item.json;\nconst timeWindow = $('Calculate Time Window').item.json.current;\n\nconst statusEmoji = {\n  healthy: '✅',\n  concerning: '⚠️',\n  critical: '🚨'\n};\n\nconst digest = `# Operations Digest - ${timeWindow.label}\\n\\n${statusEmoji[aiInsights.overallStatus]} **Status: ${aiInsights.overallStatus.toUpperCase()}**\\n\\n## Executive Summary\\n\\n${aiInsights.executiveSummary}\\n\\n## Key Metrics\\n\\n**Infrastructure:** Uptime OK\\n**Errors:** ${data.allSections.find(s => s.section === 'errors')?.totalErrors || 0}\\n**Support:** ${data.allSections.find(s => s.section === 'support')?.newTickets || 0} new tickets\\n\\n## Insights\\n\\n${aiInsights.keyInsights.map((i, idx) => `${idx + 1}. ${i}`).join('\\n')}\\n\\n---\\n\\n*Generated automatically*`;\n\nreturn {\n  digest,\n  subject: `Ops Digest ${timeWindow.label} - ${aiInsights.overallStatus.toUpperCase()}`,\n  overallStatus: aiInsights.overallStatus,\n  hasCriticalIssues: data.hasCriticalIssues\n};"
+      },
+      "name": "Build Digest",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.OPS_DIGEST_EMAIL }}",
+        "toEmail": "={{ $env.OPS_DIGEST_EMAIL }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.digest }}"
+      },
+      "name": "Send Digest Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.hasCriticalIssues }}", "value2": true}]
+        }
+      },
+      "name": "Critical Issues?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Critical Alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2650, 300]
+    }
+  ],
+  "connections": {
+    "Daily at 8am": {"main": [[{"node": "Calculate Time Window", "type": "main", "index": 0}]]},
+    "Calculate Time Window": {"main": [[{"node": "Fetch Server Status", "type": "main", "index": 0}, {"node": "Fetch Error Logs", "type": "main", "index": 0}, {"node": "Fetch Support Tickets", "type": "main", "index": 0}]]},
+    "Fetch Server Status": {"main": [[{"node": "Process Infrastructure Data", "type": "main", "index": 0}]]},
+    "Fetch Error Logs": {"main": [[{"node": "Process Error Data", "type": "main", "index": 0}]]},
+    "Fetch Support Tickets": {"main": [[{"node": "Process Support Data", "type": "main", "index": 0}]]},
+    "Process Infrastructure Data": {"main": [[{"node": "Merge All Sections", "type": "main", "index": 0}]]},
+    "Process Error Data": {"main": [[{"node": "Merge All Sections", "type": "main", "index": 1}]]},
+    "Process Support Data": {"main": [[{"node": "Merge All Sections", "type": "main", "index": 2}]]},
+    "Merge All Sections": {"main": [[{"node": "Detect Anomalies", "type": "main", "index": 0}]]},
+    "Detect Anomalies": {"main": [[{"node": "Build AI Insights Prompt", "type": "main", "index": 0}]]},
+    "Build AI Insights Prompt": {"main": [[{"node": "Call AI for Insights", "type": "main", "index": 0}]]},
+    "Call AI for Insights": {"main": [[{"node": "Build Digest", "type": "main", "index": 0}]]},
+    "Build Digest": {"main": [[{"node": "Send Digest Email", "type": "main", "index": 0}]]},
+    "Send Digest Email": {"main": [[{"node": "Critical Issues?", "type": "main", "index": 0}]]},
+    "Critical Issues?": {"main": [[{"node": "Send Critical Alert", "type": "main", "index": 0}], [{"node": "Log Completion", "type": "main", "index": 0}]]},
+    "Send Critical Alert": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

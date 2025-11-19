@@ -1,0 +1,196 @@
+{
+  "name": "LinkedIn Lead Organizer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "linkedin-leads-upload",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook - CSV Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "options": {}
+      },
+      "name": "Parse CSV Data",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const leads = $input.all();\n\nconst validatedLeads = leads.map(item => {\n  const lead = item.json;\n  \n  const firstName = (lead['First Name'] || lead.firstName || '').trim();\n  const lastName = (lead['Last Name'] || lead.lastName || '').trim();\n  const company = (lead.Company || lead.company || '').trim();\n  const title = (lead.Position || lead.Title || '').trim();\n  \n  const isValid = firstName && lastName && company && title;\n  \n  if (!isValid) {\n    return null;\n  }\n  \n  const uniqueId = `${firstName.toLowerCase()}-${lastName.toLowerCase()}-${company.toLowerCase().replace(/\\s+/g, '-')}`;\n  \n  return {\n    uniqueId,\n    firstName,\n    lastName,\n    fullName: `${firstName} ${lastName}`,\n    company,\n    title,\n    linkedinUrl: (lead['URL'] || lead['LinkedIn URL'] || '').trim(),\n    email: (lead['Email Address'] || lead.email || '').trim(),\n    source: 'linkedin-export',\n    status: 'new'\n  };\n}).filter(lead => lead !== null);\n\nreturn validatedLeads;"
+      },
+      "name": "Validate and Normalize",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "sheetId": "={{ $env.LEADS_DATABASE_SHEET_ID }}",
+        "range": "Leads Database!A:Z"
+      },
+      "name": "Fetch Existing Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const newLeads = $('Validate and Normalize').all();\nconst existingLeads = $input.all();\n\nconst existingLookup = new Set(existingLeads.map(lead => lead.json.uniqueId));\n\nconst deduplicatedLeads = newLeads.filter(lead => !existingLookup.has(lead.json.uniqueId));\n\nreturn {\n  newLeads: deduplicatedLeads,\n  duplicatesSkipped: newLeads.length - deduplicatedLeads.length\n};"
+      },
+      "name": "Check for Duplicates",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "name": "Split for Processing",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const lead = $input.item.json;\n\nconst prompt = `Analyze this LinkedIn lead for business development.\n\n**Lead:** ${lead.fullName}\n**Title:** ${lead.title}\n**Company:** ${lead.company}\n\n**Your Business:** Automation consulting and AI implementation\n**Ideal Clients:** SMBs (10-200 employees), agencies, professional services\n\nReturn JSON:\n{\n  \"industry\": \"Specific industry\",\n  \"seniority\": \"owner|c-level|director|manager|specialist\",\n  \"decisionMaker\": true/false,\n  \"companyFit\": \"excellent|good|moderate|poor\",\n  \"fitScore\": 1-10,\n  \"fitReason\": \"Why this score\",\n  \"outreachAngle\": \"One-sentence personalized approach\",\n  \"priority\": \"high|medium|low\"\n}`;\n\nreturn {\n  prompt,\n  lead\n};"
+      },
+      "name": "Build AI Analysis Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Analysis",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const analysis = $input.item.json.outputJson;\nconst lead = $('Build AI Analysis Prompt').item.json.lead;\n\nreturn {\n  ...lead,\n  industry: analysis.industry,\n  seniority: analysis.seniority,\n  decisionMaker: analysis.decisionMaker,\n  companyFit: analysis.companyFit,\n  fitScore: analysis.fitScore,\n  fitReason: analysis.fitReason,\n  outreachAngle: analysis.outreachAngle,\n  priority: analysis.priority,\n  processedAt: new Date().toISOString(),\n  status: 'enriched'\n};"
+      },
+      "name": "Extract and Merge Analysis",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData"
+      },
+      "name": "Aggregate All Leads",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const leads = $input.all();\n\nconst highPriority = leads.filter(l => l.json.priority === 'high' && l.json.fitScore >= 7);\nconst mediumPriority = leads.filter(l => l.json.priority === 'medium' || (l.json.fitScore >= 4 && l.json.fitScore < 7));\nconst lowPriority = leads.filter(l => l.json.priority === 'low' || l.json.fitScore < 4);\n\nreturn {\n  highPriority,\n  mediumPriority,\n  lowPriority,\n  summary: {\n    total: leads.length,\n    high: highPriority.length,\n    medium: mediumPriority.length,\n    low: lowPriority.length\n  }\n};"
+      },
+      "name": "Categorize by Priority",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.LEADS_DATABASE_SHEET_ID }}",
+        "range": "All Leads!A:Z",
+        "options": {}
+      },
+      "name": "Write to Database",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { highPriority, summary } = $input.item.json;\n\nconst report = `# LinkedIn Lead Outreach Plan\\nGenerated: ${new Date().toLocaleDateString()}\\n\\n## Summary\\n- **Total leads:** ${summary.total}\\n- **High priority:** ${summary.high}\\n\\n## High Priority Leads\\n\\n${highPriority.map((lead, i) => `### ${i + 1}. ${lead.json.fullName} - ${lead.json.company}\\n\\n**Role:** ${lead.json.title}\\n**Fit Score:** ${lead.json.fitScore}/10\\n**Why relevant:** ${lead.json.fitReason}\\n\\n**Outreach Strategy:** ${lead.json.outreachAngle}\\n\\n---`).join('\\n')}\\n\\n*Generated automatically*`;\n\nreturn {\n  report,\n  documentTitle: `LinkedIn Outreach Plan - ${new Date().toLocaleDateString()}`\n};"
+      },
+      "name": "Generate Outreach Doc",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "title": "={{ $json.documentTitle }}",
+        "bodyContent": "={{ $json.report }}",
+        "options": {
+          "folderId": "={{ $env.OUTREACH_DOCS_FOLDER_ID }}"
+        }
+      },
+      "name": "Save to Google Docs",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 1,
+      "position": [3050, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3250, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3450, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - CSV Upload": {"main": [[{"node": "Parse CSV Data", "type": "main", "index": 0}]]},
+    "Parse CSV Data": {"main": [[{"node": "Validate and Normalize", "type": "main", "index": 0}]]},
+    "Validate and Normalize": {"main": [[{"node": "Fetch Existing Leads", "type": "main", "index": 0}]]},
+    "Fetch Existing Leads": {"main": [[{"node": "Check for Duplicates", "type": "main", "index": 0}]]},
+    "Check for Duplicates": {"main": [[{"node": "Split for Processing", "type": "main", "index": 0}]]},
+    "Split for Processing": {"main": [[{"node": "Build AI Analysis Prompt", "type": "main", "index": 0}]]},
+    "Build AI Analysis Prompt": {"main": [[{"node": "Call AI for Analysis", "type": "main", "index": 0}]]},
+    "Call AI for Analysis": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Extract and Merge Analysis", "type": "main", "index": 0}]]},
+    "Extract and Merge Analysis": {"main": [[{"node": "Aggregate All Leads", "type": "main", "index": 0}]]},
+    "Aggregate All Leads": {"main": [[{"node": "Categorize by Priority", "type": "main", "index": 0}]]},
+    "Categorize by Priority": {"main": [[{"node": "Write to Database", "type": "main", "index": 0}]]},
+    "Write to Database": {"main": [[{"node": "Generate Outreach Doc", "type": "main", "index": 0}]]},
+    "Generate Outreach Doc": {"main": [[{"node": "Save to Google Docs", "type": "main", "index": 0}]]},
+    "Save to Google Docs": {"main": [[{"node": "Send Notification", "type": "main", "index": 0}]]},
+    "Send Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

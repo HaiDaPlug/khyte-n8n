@@ -1,0 +1,198 @@
+{
+  "name": "Weekly Report Autodraft",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "0 16 * * 5"}]
+        }
+      },
+      "name": "Every Friday at 4pm",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date();\nconst dayOfWeek = now.getDay();\n\nconst monday = new Date(now);\nmonday.setDate(now.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));\nmonday.setHours(0, 0, 0, 0);\n\nconst sunday = new Date(monday);\nsunday.setDate(monday.getDate() + 6);\nsunday.setHours(23, 59, 59, 999);\n\nreturn {\n  weekStart: monday.toISOString(),\n  weekEnd: sunday.toISOString(),\n  weekLabel: `Week of ${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,\n  year: monday.getFullYear()\n};"
+      },
+      "name": "Calculate Date Range",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "resource": "deal",
+        "filters": {
+          "closedate__gte": "={{ $json.weekStart }}",
+          "closedate__lte": "={{ $json.weekEnd }}"
+        },
+        "additionalFields": {
+          "properties": ["dealname", "amount", "dealstage", "closedate"]
+        }
+      },
+      "name": "Fetch CRM Activity",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 1,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "listId": "={{ $env.CLICKUP_LIST_ID }}",
+        "filters": {
+          "statuses": ["completed"],
+          "date_done_gt": "={{ $('Calculate Date Range').item.json.weekStart }}",
+          "date_done_lt": "={{ $('Calculate Date Range').item.json.weekEnd }}"
+        }
+      },
+      "name": "Fetch Project Milestones",
+      "type": "n8n-nodes-base.clickUp",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "resource": "invoice",
+        "filters": {
+          "created__gte": "={{ Math.floor(new Date($('Calculate Date Range').item.json.weekStart).getTime() / 1000) }}",
+          "created__lte": "={{ Math.floor(new Date($('Calculate Date Range').item.json.weekEnd).getTime() / 1000) }}",
+          "status": "paid"
+        }
+      },
+      "name": "Fetch Financial Metrics",
+      "type": "n8n-nodes-base.stripe",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "const deals = $input.all();\nconst closedDeals = deals.filter(d => d.json.dealstage === 'closedwon');\nconst totalRevenue = closedDeals.reduce((sum, d) => sum + (d.json.amount || 0), 0);\n\nreturn {\n  section: 'sales',\n  closedDeals: closedDeals.length,\n  totalRevenue,\n  closedDealsList: closedDeals.map(d => ({\n    name: d.json.dealname,\n    amount: d.json.amount\n  }))\n};"
+      },
+      "name": "Process CRM Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const tasks = $input.all();\nconst completedTasks = tasks.filter(t => t.json.status === 'completed');\n\nreturn {\n  section: 'projects',\n  totalCompleted: completedTasks.length,\n  tasks: completedTasks.map(t => ({\n    name: t.json.name,\n    completedDate: t.json.date_done\n  }))\n};"
+      },
+      "name": "Process Project Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const invoices = $input.all();\nconst paidInvoices = invoices.filter(i => i.json.status === 'paid');\nconst totalRevenue = paidInvoices.reduce((sum, i) => sum + (i.json.amount_paid || 0), 0) / 100;\n\nreturn {\n  section: 'financial',\n  paidInvoices: paidInvoices.length,\n  totalRevenue: totalRevenue\n};"
+      },
+      "name": "Process Financial Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Merge Sections",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const sections = $input.all();\nconst salesData = sections.find(s => s.json.section === 'sales');\nconst projectData = sections.find(s => s.json.section === 'projects');\nconst financialData = sections.find(s => s.json.section === 'financial');\n\nconst prompt = `Generate a professional weekly business report.\n\n**Sales:** ${salesData.json.closedDeals} deals closed, $${salesData.json.totalRevenue} revenue\n**Projects:** ${projectData.json.totalCompleted} tasks completed\n**Financial:** ${financialData.json.paidInvoices} invoices paid, $${financialData.json.totalRevenue} collected\n\nProvide:\n1. Executive summary (2-3 sentences)\n2. Key highlights (3-5 bullet points)\n3. Next week priorities\n\nTone: Professional but conversational.`;\n\nreturn {\n  prompt,\n  sections\n};"
+      },
+      "name": "Build Report Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Report Generation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const aiOutput = $input.item.json.outputText;\nconst dateRange = $('Calculate Date Range').item.json;\n\nconst report = `# Weekly Business Report\\n${dateRange.weekLabel}\\n\\n${aiOutput}\\n\\n---\\n\\n*Generated automatically on ${new Date().toLocaleString()}*`;\n\nreturn {\n  report,\n  reportTitle: `Weekly Report - ${dateRange.weekLabel}`\n};"
+      },
+      "name": "Format Report Document",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 200]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "title": "={{ $json.reportTitle }}",
+        "bodyContent": "={{ $json.report }}",
+        "options": {
+          "folderId": "={{ $env.REPORTS_FOLDER_ID }}"
+        }
+      },
+      "name": "Write to Google Doc",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2250, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    }
+  ],
+  "connections": {
+    "Every Friday at 4pm": {"main": [[{"node": "Calculate Date Range", "type": "main", "index": 0}]]},
+    "Calculate Date Range": {"main": [[{"node": "Fetch CRM Activity", "type": "main", "index": 0}, {"node": "Fetch Project Milestones", "type": "main", "index": 0}, {"node": "Fetch Financial Metrics", "type": "main", "index": 0}]]},
+    "Fetch CRM Activity": {"main": [[{"node": "Process CRM Data", "type": "main", "index": 0}]]},
+    "Fetch Project Milestones": {"main": [[{"node": "Process Project Data", "type": "main", "index": 0}]]},
+    "Fetch Financial Metrics": {"main": [[{"node": "Process Financial Data", "type": "main", "index": 0}]]},
+    "Process CRM Data": {"main": [[{"node": "Merge Sections", "type": "main", "index": 0}]]},
+    "Process Project Data": {"main": [[{"node": "Merge Sections", "type": "main", "index": 1}]]},
+    "Process Financial Data": {"main": [[{"node": "Merge Sections", "type": "main", "index": 2}]]},
+    "Merge Sections": {"main": [[{"node": "Build Report Prompt", "type": "main", "index": 0}]]},
+    "Build Report Prompt": {"main": [[{"node": "Call AI for Report Generation", "type": "main", "index": 0}]]},
+    "Call AI for Report Generation": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Format Report Document", "type": "main", "index": 0}]]},
+    "Format Report Document": {"main": [[{"node": "Write to Google Doc", "type": "main", "index": 0}]]},
+    "Write to Google Doc": {"main": [[{"node": "Send Notification", "type": "main", "index": 0}]]},
+    "Send Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

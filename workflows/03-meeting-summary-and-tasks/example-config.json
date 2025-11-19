@@ -1,0 +1,217 @@
+{
+  "name": "Meeting Summary and Tasks",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "recording.completed"
+      },
+      "name": "New Zoom Recording",
+      "type": "n8n-nodes-base.zoomTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.item.json;\n\nreturn {\n  meetingId: input.payload.object.id,\n  topic: input.payload.object.topic,\n  startTime: input.payload.object.start_time,\n  duration: input.payload.object.duration,\n  recordingUrl: input.payload.object.recording_files[0]?.download_url,\n  transcript: input.payload.object.transcript,\n  attendees: input.payload.object.participant_email?.split(',') || [],\n  source: 'zoom'\n};"
+      },
+      "name": "Extract Meeting Metadata",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [{"value1": "={{ $json.transcript }}", "operation": "isEmpty"}]
+        }
+      },
+      "name": "Transcription Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.recordingUrl }}",
+        "responseFormat": "file",
+        "options": {
+          "download": true
+        }
+      },
+      "name": "Download Recording",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "operation": "transcribe",
+        "resource": "audio",
+        "binaryPropertyName": "data",
+        "options": {
+          "model": "whisper-1",
+          "temperature": 0
+        }
+      },
+      "name": "Transcribe with Whisper",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "let transcript = $input.item.json.transcript || $input.item.json.text;\n\ntranscript = transcript.replace(/\\n{3,}/g, '\\n\\n');\ntranscript = transcript.replace(/\\[\\d{2}:\\d{2}:\\d{2}\\]/g, '');\n\nreturn {\n  cleanTranscript: transcript,\n  wordCount: transcript.split(' ').length\n};"
+      },
+      "name": "Clean Transcript",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const transcript = $input.item.json.cleanTranscript;\nconst metadata = $('Extract Meeting Metadata').item.json;\n\nconst prompt = `Analyze this meeting transcript and extract structured information.\n\n**Meeting:** ${metadata.topic}\n**Date:** ${metadata.startTime}\n**Attendees:** ${metadata.attendees.join(', ')}\n\n**Transcript:**\n${transcript}\n\nExtract:\n{\n  \"summary\": \"2-3 sentence overview\",\n  \"keyPoints\": [\"point 1\", \"point 2\"],\n  \"decisions\": [\"decision 1\", \"decision 2\"],\n  \"actionItems\": [\n    {\n      \"task\": \"description\",\n      \"assignee\": \"name or Unassigned\",\n      \"dueDate\": \"date or Not specified\",\n      \"priority\": \"high/medium/low\"\n    }\n  ],\n  \"followUpTopics\": [\"topic 1\", \"topic 2\"]\n}`;\n\nreturn {\n  prompt,\n  transcript,\n  metadata\n};"
+      },
+      "name": "Build AI Extraction Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Extraction",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const extracted = $input.item.json.outputJson;\nconst metadata = $('Build AI Extraction Prompt').item.json.metadata;\n\nreturn {\n  meetingId: metadata.meetingId,\n  topic: metadata.topic,\n  date: metadata.startTime,\n  attendees: metadata.attendees,\n  summary: extracted.summary,\n  keyPoints: extracted.keyPoints,\n  decisions: extracted.decisions,\n  actionItems: extracted.actionItems,\n  followUpTopics: extracted.followUpTopics\n};"
+      },
+      "name": "Parse AI Output",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Split Action Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [2250, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const actionItem = $input.item.json;\nconst meeting = $('Parse AI Output').item.json;\n\nreturn {\n  taskName: actionItem.task,\n  description: `From meeting: ${meeting.topic}\\n\\nContext: ${meeting.summary}`,\n  assignee: actionItem.assignee,\n  priority: actionItem.priority,\n  tags: ['meeting-action', meeting.topic.toLowerCase().replace(/\\s+/g, '-')],\n  meetingId: meeting.meetingId\n};"
+      },
+      "name": "Map Action Item to Task",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "listId": "={{ $env.CLICKUP_TASK_LIST_ID }}",
+        "name": "={{ $json.taskName }}",
+        "additionalFields": {
+          "description": "={{ $json.description }}",
+          "priority": "={{ $json.priority === 'high' ? 1 : $json.priority === 'medium' ? 2 : 3 }}",
+          "tags": "={{ $json.tags }}"
+        }
+      },
+      "name": "Create Task in ClickUp",
+      "type": "n8n-nodes-base.clickUp",
+      "typeVersion": 1,
+      "position": [2650, 200]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData"
+      },
+      "name": "Aggregate Task Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const meeting = $('Parse AI Output').item.json;\nconst tasks = $input.all();\n\nconst notesMarkdown = `# ${meeting.topic}\\n\\n**Date:** ${new Date(meeting.date).toLocaleString()}\\n**Attendees:** ${meeting.attendees.join(', ')}\\n\\n## Summary\\n\\n${meeting.summary}\\n\\n## Key Points\\n\\n${meeting.keyPoints.map(p => `- ${p}`).join('\\n')}\\n\\n## Action Items\\n\\n${meeting.actionItems.map((item, i) => `${i + 1}. **${item.task}**\\n   - Assigned to: ${item.assignee}\\n   - Priority: ${item.priority}`).join('\\n\\n')}\\n\\n---\\n\\n*Generated automatically*`;\n\nreturn {\n  markdown: notesMarkdown,\n  documentTitle: `Meeting Notes: ${meeting.topic}`\n};"
+      },
+      "name": "Build Meeting Notes",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [3050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "title": "={{ $json.documentTitle }}",
+        "bodyContent": "={{ $json.markdown }}",
+        "options": {
+          "folderId": "={{ $env.MEETING_NOTES_FOLDER_ID }}"
+        }
+      },
+      "name": "Save to Google Docs",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 1,
+      "position": [3250, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3450, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3650, 300]
+    }
+  ],
+  "connections": {
+    "New Zoom Recording": {"main": [[{"node": "Extract Meeting Metadata", "type": "main", "index": 0}]]},
+    "Extract Meeting Metadata": {"main": [[{"node": "Transcription Needed?", "type": "main", "index": 0}]]},
+    "Transcription Needed?": {"main": [[{"node": "Download Recording", "type": "main", "index": 0}], [{"node": "Clean Transcript", "type": "main", "index": 0}]]},
+    "Download Recording": {"main": [[{"node": "Transcribe with Whisper", "type": "main", "index": 0}]]},
+    "Transcribe with Whisper": {"main": [[{"node": "Clean Transcript", "type": "main", "index": 0}]]},
+    "Clean Transcript": {"main": [[{"node": "Build AI Extraction Prompt", "type": "main", "index": 0}]]},
+    "Build AI Extraction Prompt": {"main": [[{"node": "Call AI for Extraction", "type": "main", "index": 0}]]},
+    "Call AI for Extraction": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Parse AI Output", "type": "main", "index": 0}]]},
+    "Parse AI Output": {"main": [[{"node": "Split Action Items", "type": "main", "index": 0}]]},
+    "Split Action Items": {"main": [[{"node": "Map Action Item to Task", "type": "main", "index": 0}]]},
+    "Map Action Item to Task": {"main": [[{"node": "Create Task in ClickUp", "type": "main", "index": 0}]]},
+    "Create Task in ClickUp": {"main": [[{"node": "Aggregate Task Results", "type": "main", "index": 0}]]},
+    "Aggregate Task Results": {"main": [[{"node": "Build Meeting Notes", "type": "main", "index": 0}]]},
+    "Build Meeting Notes": {"main": [[{"node": "Save to Google Docs", "type": "main", "index": 0}]]},
+    "Save to Google Docs": {"main": [[{"node": "Send Notification", "type": "main", "index": 0}]]},
+    "Send Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

@@ -1,0 +1,160 @@
+{
+  "name": "Lead Enrichment Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 30}]
+        }
+      },
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "sheetId": "={{ $env.LEADS_SHEET_ID }}",
+        "range": "Sheet1!A:Z",
+        "options": {
+          "filter": {
+            "column": "Status",
+            "value": "new"
+          }
+        }
+      },
+      "name": "Fetch Unprocessed Leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [{"value1": "={{ $json.length }}", "operation": "larger", "value2": 0}]
+        }
+      },
+      "name": "Leads Exist?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const lead = $input.item.json;\n\nreturn {\n  id: lead.id || lead.rowNumber,\n  name: (lead.name || '').trim(),\n  email: (lead.email || '').toLowerCase().trim(),\n  company: (lead.company || '').trim(),\n  website: (lead.website || '').trim().replace(/\\/$/, ''),\n  title: (lead.title || '').trim(),\n  rawData: lead\n};"
+      },
+      "name": "Normalize Lead Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const lead = $input.item.json;\n\nconst prompt = `Extract and enrich information for this lead:\n\nName: ${lead.name}\nEmail: ${lead.email}\nCompany: ${lead.company}\nWebsite: ${lead.website}\nTitle: ${lead.title}\n\nPlease analyze and return the following:\n1. industry: Best-fit industry category\n2. companySize: Estimate (small/medium/large)\n3. seniority: Job seniority (owner/executive/manager/specialist/other)\n4. tags: Array of relevant tags (e.g. [\"agency\", \"local\", \"b2b\"])\n5. fitScore: Relevance for automation consulting (1-10)\n6. outreachAngle: One-sentence personalized angle for outreach`;\n\nreturn {\n  prompt,\n  mode: 'json',\n  systemInstructions: 'You are a B2B lead analyst. Analyze leads for automation and AI consulting relevance. Return valid JSON matching the requested schema.',\n  temperature: 0.2,\n  lead\n};"
+      },
+      "name": "Build AI Enrichment Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Enrichment",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const enrichment = $input.item.json.outputJson;\nconst lead = $('Build AI Enrichment Prompt').item.json.lead;\n\nreturn {\n  ...lead,\n  industry: enrichment.industry,\n  companySize: enrichment.companySize,\n  seniority: enrichment.seniority,\n  tags: enrichment.tags.join(', '),\n  fitScore: enrichment.fitScore,\n  outreachAngle: enrichment.outreachAngle,\n  enrichedAt: new Date().toISOString(),\n  status: 'enriched'\n};"
+      },
+      "name": "Extract Enrichment Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 100]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "sheetId": "={{ $env.LEADS_SHEET_ID }}",
+        "range": "Sheet1",
+        "options": {
+          "lookupColumn": "email",
+          "lookupValue": "={{ $json.email }}"
+        }
+      },
+      "name": "Write Enriched Data Back",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2050, 100]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData"
+      },
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2250, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\n\nconst total = items.length;\nconst succeeded = items.filter(i => i.json.status === 'enriched').length;\nconst failed = items.filter(i => i.json.status === 'enrichment_failed').length;\n\nreturn {\n  total,\n  succeeded,\n  failed,\n  successRate: ((succeeded / total) * 100).toFixed(1) + '%'\n};"
+      },
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2650, 200]
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": {"main": [[{"node": "Fetch Unprocessed Leads", "type": "main", "index": 0}]]},
+    "Fetch Unprocessed Leads": {"main": [[{"node": "Leads Exist?", "type": "main", "index": 0}]]},
+    "Leads Exist?": {"main": [[{"node": "Split In Batches", "type": "main", "index": 0}]]},
+    "Split In Batches": {"main": [[{"node": "Normalize Lead Data", "type": "main", "index": 0}]]},
+    "Normalize Lead Data": {"main": [[{"node": "Build AI Enrichment Prompt", "type": "main", "index": 0}]]},
+    "Build AI Enrichment Prompt": {"main": [[{"node": "Call AI for Enrichment", "type": "main", "index": 0}]]},
+    "Call AI for Enrichment": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Extract Enrichment Data", "type": "main", "index": 0}]]},
+    "Extract Enrichment Data": {"main": [[{"node": "Write Enriched Data Back", "type": "main", "index": 0}]]},
+    "Write Enriched Data Back": {"main": [[{"node": "Aggregate Results", "type": "main", "index": 0}]]},
+    "Aggregate Results": {"main": [[{"node": "Build Summary", "type": "main", "index": 0}]]},
+    "Build Summary": {"main": [[{"node": "Send Notification", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

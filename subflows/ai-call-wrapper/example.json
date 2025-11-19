@@ -1,0 +1,401 @@
+{
+  "name": "AI Call Wrapper",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "When Called",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            },
+            {
+              "name": "mode",
+              "value": "={{ $json.mode || 'text' }}"
+            },
+            {
+              "name": "systemInstructions",
+              "value": "={{ $json.systemInstructions || '' }}"
+            },
+            {
+              "name": "model",
+              "value": "={{ $json.model || $env.AI_MODEL || 'gpt-4-turbo' }}"
+            },
+            {
+              "name": "apiProvider",
+              "value": "={{ $json.apiProvider || 'openai' }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "temperature",
+              "value": "={{ $json.temperature || 0.3 }}"
+            },
+            {
+              "name": "maxTokens",
+              "value": "={{ $json.maxTokens || 2000 }}"
+            },
+            {
+              "name": "retryCount",
+              "value": "={{ $json.retryCount || 0 }}"
+            }
+          ]
+        }
+      },
+      "name": "Set Input Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const params = $input.item.json;\nconst isOpenAI = params.apiProvider === 'openai';\nconst isJSON = params.mode === 'json';\n\nlet payload, url, headers;\n\nif (isOpenAI) {\n  payload = {\n    model: params.model,\n    messages: [],\n    temperature: params.temperature,\n    max_tokens: params.maxTokens\n  };\n\n  if (params.systemInstructions) {\n    payload.messages.push({role: 'system', content: params.systemInstructions});\n  }\n  \n  if (isJSON && !params.systemInstructions) {\n    payload.messages.push({role: 'system', content: 'You must respond with valid JSON.'});\n  }\n  \n  payload.messages.push({role: 'user', content: params.prompt});\n\n  if (isJSON) {\n    payload.response_format = {type: 'json_object'};\n  }\n\n  url = 'https://api.openai.com/v1/chat/completions';\n  headers = {\n    'Content-Type': 'application/json',\n    'Authorization': 'Bearer ' + '{{ $env.OPENAI_API_KEY }}'\n  };\n\n} else { // Anthropic\n  payload = {\n    model: params.model,\n    messages: [{role: 'user', content: params.prompt}],\n    temperature: params.temperature,\n    max_tokens: params.maxTokens\n  };\n\n  if (params.systemInstructions) {\n    payload.system = params.systemInstructions;\n    if (isJSON) {\n      payload.system += '\\n\\nYou must respond with valid JSON only.';\n    }\n  } else if (isJSON) {\n    payload.system = 'You must respond with valid JSON only.';\n  }\n\n  url = 'https://api.anthropic.com/v1/messages';\n  headers = {\n    'Content-Type': 'application/json',\n    'x-api-key': '{{ $env.ANTHROPIC_API_KEY }}',\n    'anthropic-version': '2023-06-01'\n  };\n}\n\nreturn {\n  url,\n  method: 'POST',\n  headers,\n  body: payload,\n  originalParams: params\n};"
+      },
+      "name": "Build API Request",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": "={{ $json.headers }}"
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "name": "Execute AI API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [850, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.statusCode >= 200 && $json.statusCode < 300 }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Check HTTP Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.item.json.body || $input.item.json;\nconst params = $('Build API Request').item.json.originalParams;\nconst isOpenAI = params.apiProvider === 'openai';\n\nlet content, tokensUsed;\n\nif (isOpenAI) {\n  content = response.choices[0].message.content;\n  tokensUsed = response.usage?.total_tokens || 0;\n} else { // Anthropic\n  content = response.content[0].text;\n  const usage = response.usage || {};\n  tokensUsed = (usage.input_tokens || 0) + (usage.output_tokens || 0);\n}\n\nreturn {\n  content,\n  tokensUsed,\n  model: params.model,\n  mode: params.mode,\n  retryCount: params.retryCount\n};"
+      },
+      "name": "Extract AI Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "mode": "={{ $json.mode }}",
+        "rules": {
+          "rules": [
+            {
+              "value": "text",
+              "output": 0
+            },
+            {
+              "value": "json",
+              "output": 1
+            }
+          ]
+        }
+      },
+      "name": "Process by Mode",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "return {\n  success: true,\n  mode: 'text',\n  outputText: $input.item.json.content,\n  tokensUsed: $input.item.json.tokensUsed,\n  model: $input.item.json.model\n};"
+      },
+      "name": "Return Text Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1650, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "const content = $input.item.json.content;\nconst retryCount = $input.item.json.retryCount;\n\ntry {\n  const parsed = JSON.parse(content);\n  return {\n    success: true,\n    parseSuccess: true,\n    mode: 'json',\n    outputJson: parsed,\n    tokensUsed: $input.item.json.tokensUsed,\n    model: $input.item.json.model\n  };\n} catch (error) {\n  return {\n    success: false,\n    parseSuccess: false,\n    content,\n    retryCount,\n    originalParams: $('Build API Request').item.json.originalParams,\n    parseError: error.message\n  };\n}"
+      },
+      "name": "Parse JSON Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.parseSuccess }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "name": "Check Parse Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.retryCount }}",
+              "operation": "smaller",
+              "value2": 1
+            }
+          ]
+        }
+      },
+      "name": "Should Retry Parse?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2050, 400]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.originalParams.prompt }}\\n\\nIMPORTANT: You MUST return ONLY valid JSON. No explanations, no markdown, no extra text."
+            },
+            {
+              "name": "mode",
+              "value": "json"
+            },
+            {
+              "name": "systemInstructions",
+              "value": "={{ $json.originalParams.systemInstructions }}\\n\\nYou must respond with valid JSON only. No other text."
+            },
+            {
+              "name": "model",
+              "value": "={{ $json.originalParams.model }}"
+            },
+            {
+              "name": "apiProvider",
+              "value": "={{ $json.originalParams.apiProvider }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "temperature",
+              "value": "={{ $json.originalParams.temperature }}"
+            },
+            {
+              "name": "maxTokens",
+              "value": "={{ $json.originalParams.maxTokens }}"
+            },
+            {
+              "name": "retryCount",
+              "value": "={{ $json.retryCount + 1 }}"
+            }
+          ]
+        }
+      },
+      "name": "Build Retry with Stricter Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "return {\n  success: false,\n  error: {\n    type: 'ParseError',\n    message: 'Failed to parse AI response as JSON after retry',\n    details: {\n      rawContent: $input.item.json.content,\n      parseError: $input.item.json.parseError\n    }\n  }\n};"
+      },
+      "name": "Return Parse Error",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const statusCode = $input.item.json.statusCode || 0;\nconst responseBody = $input.item.json.body || $input.item.json;\n\nlet errorType = 'APIError';\nlet message = 'AI API call failed';\n\nif (statusCode === 429) {\n  errorType = 'RateLimitError';\n  message = 'Rate limit exceeded';\n} else if (statusCode === 401 || statusCode === 403) {\n  errorType = 'AuthError';\n  message = 'Authentication failed - check API key';\n} else if (statusCode >= 500) {\n  errorType = 'ServerError';\n  message = 'AI service error';\n} else if (!statusCode) {\n  errorType = 'NetworkError';\n  message = 'Network error - unable to reach AI service';\n}\n\nreturn {\n  success: false,\n  error: {\n    type: errorType,\n    message: `${message} (${statusCode})`,\n    details: {\n      statusCode,\n      responseBody\n    }\n  }\n};"
+      },
+      "name": "Normalize API Error",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 400]
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Set Input Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Input Parameters": {
+      "main": [
+        [
+          {
+            "node": "Build API Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build API Request": {
+      "main": [
+        [
+          {
+            "node": "Execute AI API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute AI API Call": {
+      "main": [
+        [
+          {
+            "node": "Check HTTP Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check HTTP Success": {
+      "main": [
+        [
+          {
+            "node": "Extract AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize API Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract AI Response": {
+      "main": [
+        [
+          {
+            "node": "Process by Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process by Mode": {
+      "main": [
+        [
+          {
+            "node": "Return Text Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse JSON Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse JSON Response": {
+      "main": [
+        [
+          {
+            "node": "Check Parse Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Parse Success": {
+      "main": [
+        [
+          {
+            "node": "Should Retry Parse?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Retry Parse?": {
+      "main": [
+        [
+          {
+            "node": "Build Retry with Stricter Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return Parse Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Retry with Stricter Prompt": {
+      "main": [
+        [
+          {
+            "node": "Build API Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1",
+  "id": "ai-call-wrapper-subflow",
+  "meta": {
+    "instanceId": "khyte-n8n-subflow"
+  },
+  "tags": []
+}

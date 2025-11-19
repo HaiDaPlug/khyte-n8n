@@ -1,0 +1,168 @@
+{
+  "name": "Proposal and Follow-up Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "proposal-request",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook - Proposal Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.item.json;\n\nreturn {\n  clientName: input.clientName || input.form_response?.answers?.find(a => a.field.ref === 'client_name')?.text,\n  clientEmail: input.clientEmail || input.form_response?.answers?.find(a => a.field.ref === 'email')?.email,\n  companyName: input.companyName || input.form_response?.answers?.find(a => a.field.ref === 'company')?.text,\n  projectDescription: input.projectDescription || input.form_response?.answers?.find(a => a.field.ref === 'project_description')?.text,\n  desiredTimeline: input.timeline || 'Not specified',\n  budgetRange: input.budget || 'Not specified',\n  proposalId: `PROP-${Date.now()}`,\n  createdAt: new Date().toISOString()\n};"
+      },
+      "name": "Extract Project Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const data = $input.item.json;\n\nconst requiredFields = ['clientName', 'clientEmail', 'projectDescription'];\nconst missing = requiredFields.filter(field => !data[field] || data[field].trim() === '');\n\nif (missing.length > 0) {\n  return {\n    valid: false,\n    missingFields: missing\n  };\n}\n\nreturn {\n  valid: true,\n  data\n};"
+      },
+      "name": "Validate Required Fields",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.valid }}", "value2": true}]
+        }
+      },
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const project = $input.item.json.data || $input.item.json;\n\nconst prompt = `Create a detailed proposal breakdown for this project.\n\n**Client:** ${project.clientName}, ${project.companyName}\n**Project:** ${project.projectDescription}\n**Timeline:** ${project.desiredTimeline}\n**Budget:** ${project.budgetRange}\n\n**Your Service:** Automation consulting, $150/hr, $1200/day\n\nReturn JSON:\n{\n  \"projectTitle\": \"Concise project name\",\n  \"executiveSummary\": \"2-3 sentences\",\n  \"scopeOfWork\": {\n    \"phases\": [\n      {\n        \"name\": \"Phase name\",\n        \"description\": \"What happens\",\n        \"deliverables\": [\"deliverable 1\"],\n        \"estimatedHours\": number,\n        \"duration\": \"X weeks\"\n      }\n    ]\n  },\n  \"pricing\": {\n    \"totalEstimate\": number,\n    \"breakdown\": [{\"item\": \"description\", \"hours\": number, \"rate\": 150, \"total\": number}],\n    \"paymentTerms\": \"50% upfront, 50% on completion\"\n  },\n  \"timeline\": {\n    \"totalDuration\": \"X weeks\"\n  }\n}`;\n\nreturn {\n  prompt,\n  project\n};"
+      },
+      "name": "Build Proposal Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Proposal",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const proposal = $input.item.json.outputJson;\nconst project = $('Build Proposal Prompt').item.json.project;\nconst today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });\n\nconst proposalDoc = `# Project Proposal\\n\\n**${proposal.projectTitle}**\\n\\n**Prepared for:** ${project.clientName}, ${project.companyName}\\n**Date:** ${today}\\n**Proposal ID:** ${project.proposalId}\\n\\n---\\n\\n## Executive Summary\\n\\n${proposal.executiveSummary}\\n\\n## Scope of Work\\n\\n${proposal.scopeOfWork.phases.map((phase, i) => `### Phase ${i + 1}: ${phase.name}\\n\\n${phase.description}\\n\\n**Deliverables:**\\n${phase.deliverables.map(d => `- ${d}`).join('\\n')}\\n\\n**Duration:** ${phase.duration}`).join('\\n\\n')}\\n\\n## Investment\\n\\n**Total estimate:** $${proposal.pricing.totalEstimate.toLocaleString()}\\n\\n**Breakdown:**\\n${proposal.pricing.breakdown.map(item => `- ${item.item}: ${item.hours} hours × $${item.rate}/hour = $${item.total.toLocaleString()}`).join('\\n')}\\n\\n**Payment terms:** ${proposal.pricing.paymentTerms}\\n\\n---\\n\\n*This proposal is valid for 30 days*`;\n\nreturn {\n  proposalDoc,\n  proposalData: {\n    ...project,\n    ...proposal,\n    totalPrice: proposal.pricing.totalEstimate,\n    status: 'sent',\n    sentAt: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Format Proposal",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "title": "Proposal - {{ $json.proposalData.projectTitle }} - {{ $json.proposalData.companyName }}",
+        "bodyContent": "={{ $json.proposalDoc }}",
+        "options": {
+          "folderId": "={{ $env.PROPOSALS_FOLDER_ID }}"
+        }
+      },
+      "name": "Create Proposal Doc",
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 1,
+      "position": [1850, 200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.YOUR_EMAIL }}",
+        "toEmail": "={{ $('Extract Project Data').item.json.clientEmail }}",
+        "subject": "Proposal: {{ $('Format Proposal').item.json.proposalData.projectTitle }}",
+        "emailType": "html",
+        "message": "Hi {{ $('Extract Project Data').item.json.clientName }},<br><br>Thank you for considering me for your project. Please find the proposal attached.<br><br>**Investment:** ${{ $('Format Proposal').item.json.proposalData.totalPrice.toLocaleString() }}<br>**Timeline:** {{ $('Format Proposal').item.json.proposalData.timeline.totalDuration }}<br><br>Please let me know if you have any questions.<br><br>Best regards"
+      },
+      "name": "Send Proposal Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.PROPOSALS_DATABASE_SHEET_ID }}",
+        "range": "Proposals!A:Z",
+        "options": {}
+      },
+      "name": "Save to Database",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2250, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Internal Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2650, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Error Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    }
+  ],
+  "connections": {
+    "Webhook - Proposal Request": {"main": [[{"node": "Extract Project Data", "type": "main", "index": 0}]]},
+    "Extract Project Data": {"main": [[{"node": "Validate Required Fields", "type": "main", "index": 0}]]},
+    "Validate Required Fields": {"main": [[{"node": "Valid?", "type": "main", "index": 0}]]},
+    "Valid?": {"main": [[{"node": "Build Proposal Prompt", "type": "main", "index": 0}], [{"node": "Send Error Notification", "type": "main", "index": 0}]]},
+    "Build Proposal Prompt": {"main": [[{"node": "Call AI for Proposal", "type": "main", "index": 0}]]},
+    "Call AI for Proposal": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Format Proposal", "type": "main", "index": 0}], [{"node": "Send Error Notification", "type": "main", "index": 0}]]},
+    "Format Proposal": {"main": [[{"node": "Create Proposal Doc", "type": "main", "index": 0}]]},
+    "Create Proposal Doc": {"main": [[{"node": "Send Proposal Email", "type": "main", "index": 0}]]},
+    "Send Proposal Email": {"main": [[{"node": "Save to Database", "type": "main", "index": 0}]]},
+    "Save to Database": {"main": [[{"node": "Send Internal Notification", "type": "main", "index": 0}]]},
+    "Send Internal Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]},
+    "Send Error Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

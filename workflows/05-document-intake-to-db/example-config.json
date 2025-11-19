@@ -1,0 +1,198 @@
+{
+  "name": "Document Intake to Database",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "file.created",
+        "path": "/Documents/Inbox"
+      },
+      "name": "New File in Dropbox",
+      "type": "n8n-nodes-base.dropboxTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const file = $input.item.json;\n\nreturn {\n  fileName: file.name,\n  filePath: file.path_display,\n  fileId: file.id,\n  uploadedAt: file.server_modified,\n  fileSize: file.size,\n  mimeType: file.name.endsWith('.pdf') ? 'application/pdf' : 'image/png',\n  source: 'dropbox'\n};"
+      },
+      "name": "Extract File Metadata",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://content.dropboxapi.com/2/files/download",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "dropboxApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Dropbox-API-Arg", "value": "{\"path\": \"={{ $json.filePath }}\"}"}
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "name": "Download File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const fileName = $input.item.json.fileName.toLowerCase();\n\nlet documentType = 'unknown';\nlet extractionSchema = null;\n\nif (fileName.includes('invoice') || fileName.includes('bill')) {\n  documentType = 'invoice';\n  extractionSchema = {\n    vendor: 'string',\n    invoiceNumber: 'string',\n    invoiceDate: 'date',\n    totalAmount: 'number',\n    currency: 'string'\n  };\n} else if (fileName.includes('receipt')) {\n  documentType = 'receipt';\n  extractionSchema = {\n    merchant: 'string',\n    date: 'date',\n    total: 'number'\n  };\n} else if (fileName.includes('contract')) {\n  documentType = 'contract';\n  extractionSchema = {\n    parties: 'array',\n    effectiveDate: 'date',\n    contractValue: 'number'\n  };\n}\n\nreturn {\n  ...($input.item.json),\n  documentType,\n  extractionSchema\n};"
+      },
+      "name": "Detect Document Type",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "extractText",
+        "options": {
+          "features": ["DOCUMENT_TEXT_DETECTION"]
+        }
+      },
+      "name": "OCR Extract Text",
+      "type": "n8n-nodes-base.googleCloudVision",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const ocrText = $input.item.json.fullText;\nconst documentType = $('Detect Document Type').item.json.documentType;\n\nlet extractionPrompt = '';\n\nif (documentType === 'invoice') {\n  extractionPrompt = `Extract data from this invoice.\n\n**OCR Text:** ${ocrText}\n\nReturn JSON:\n{\n  \"vendor\": \"Company name\",\n  \"invoiceNumber\": \"Invoice #\",\n  \"invoiceDate\": \"YYYY-MM-DD\",\n  \"totalAmount\": numeric value only,\n  \"currency\": \"USD/EUR/SEK\",\n  \"confidence\": \"high/medium/low\"\n}`;\n} else {\n  extractionPrompt = `Extract key information from this document.\n\n**OCR Text:** ${ocrText}\n\nReturn structured JSON.`;\n}\n\nreturn {\n  extractionPrompt,\n  ocrText,\n  documentType\n};"
+      },
+      "name": "Build Extraction Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Extraction",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "Extraction Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const extracted = $input.item.json.outputJson;\nconst documentType = $('Build Extraction Prompt').item.json.documentType;\n\nconst validationErrors = [];\n\nif (documentType === 'invoice') {\n  if (!extracted.vendor) validationErrors.push('Missing vendor');\n  if (!extracted.invoiceNumber) validationErrors.push('Missing invoice number');\n  if (!extracted.totalAmount) validationErrors.push('Missing total amount');\n}\n\nconst isValid = validationErrors.length === 0;\n\nreturn {\n  ...extracted,\n  isValid,\n  validationErrors,\n  validatedAt: new Date().toISOString()\n};"
+      },
+      "name": "Validate Extracted Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.isValid }}", "value2": true}]
+        }
+      },
+      "name": "Validation Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const extracted = $input.item.json;\nconst fileMetadata = $('Extract File Metadata').item.json;\n\nreturn {\n  documentId: `${extracted.documentType || 'doc'}-${Date.now()}`,\n  documentType: extracted.documentType,\n  fileName: fileMetadata.fileName,\n  vendor: extracted.vendor || extracted.merchant,\n  invoiceNumber: extracted.invoiceNumber,\n  invoiceDate: extracted.invoiceDate || extracted.date,\n  totalAmount: extracted.totalAmount || extracted.total,\n  currency: extracted.currency || 'SEK',\n  status: 'processed',\n  processedAt: new Date().toISOString()\n};"
+      },
+      "name": "Prepare Database Record",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2250, 100]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.DOCUMENTS_DATABASE_SHEET_ID }}",
+        "range": "Documents!A:J",
+        "options": {}
+      },
+      "name": "Write to Database",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2450, 100]
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "path": "={{ $('Extract File Metadata').item.json.filePath }}",
+        "newPath": "/Documents/Processed/={{ $json.documentId }}_={{ $('Extract File Metadata').item.json.fileName }}"
+      },
+      "name": "Move File to Processed",
+      "type": "n8n-nodes-base.dropbox",
+      "typeVersion": 1,
+      "position": [2650, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Success Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2850, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Failure Notification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3050, 200]
+    }
+  ],
+  "connections": {
+    "New File in Dropbox": {"main": [[{"node": "Extract File Metadata", "type": "main", "index": 0}]]},
+    "Extract File Metadata": {"main": [[{"node": "Download File", "type": "main", "index": 0}]]},
+    "Download File": {"main": [[{"node": "Detect Document Type", "type": "main", "index": 0}]]},
+    "Detect Document Type": {"main": [[{"node": "OCR Extract Text", "type": "main", "index": 0}]]},
+    "OCR Extract Text": {"main": [[{"node": "Build Extraction Prompt", "type": "main", "index": 0}]]},
+    "Build Extraction Prompt": {"main": [[{"node": "Call AI for Extraction", "type": "main", "index": 0}]]},
+    "Call AI for Extraction": {"main": [[{"node": "Extraction Success?", "type": "main", "index": 0}]]},
+    "Extraction Success?": {"main": [[{"node": "Validate Extracted Data", "type": "main", "index": 0}], [{"node": "Send Failure Notification", "type": "main", "index": 0}]]},
+    "Validate Extracted Data": {"main": [[{"node": "Validation Passed?", "type": "main", "index": 0}]]},
+    "Validation Passed?": {"main": [[{"node": "Prepare Database Record", "type": "main", "index": 0}], [{"node": "Send Failure Notification", "type": "main", "index": 0}]]},
+    "Prepare Database Record": {"main": [[{"node": "Write to Database", "type": "main", "index": 0}]]},
+    "Write to Database": {"main": [[{"node": "Move File to Processed", "type": "main", "index": 0}]]},
+    "Move File to Processed": {"main": [[{"node": "Send Success Notification", "type": "main", "index": 0}]]},
+    "Send Success Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]},
+    "Send Failure Notification": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}

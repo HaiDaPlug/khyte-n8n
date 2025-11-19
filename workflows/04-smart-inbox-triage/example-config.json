@@ -1,0 +1,230 @@
+{
+  "name": "Smart Inbox Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "cronExpression", "expression": "*/15 * * * *"}]
+        }
+      },
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "filters": {
+          "labelIds": ["INBOX", "UNREAD"],
+          "excludeLabelIds": ["processed"]
+        },
+        "options": {
+          "maxResults": 20,
+          "format": "full"
+        }
+      },
+      "name": "Fetch Unread Emails",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [{"value1": "={{ $json.length }}", "operation": "larger", "value2": 0}]
+        }
+      },
+      "name": "Emails Exist?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const email = $input.item.json;\n\nlet body = '';\nif (email.payload?.parts) {\n  const textPart = email.payload.parts.find(p => p.mimeType === 'text/plain');\n  if (textPart?.body?.data) {\n    body = Buffer.from(textPart.body.data, 'base64').toString();\n  }\n} else if (email.payload?.body?.data) {\n  body = Buffer.from(email.payload.body.data, 'base64').toString();\n}\n\nconst cleanBody = body.split(/On .+ wrote:/)[0].split(/_{3,}/)[0].trim();\n\nconst from = email.payload.headers.find(h => h.name === 'From')?.value || '';\nconst subject = email.payload.headers.find(h => h.name === 'Subject')?.value || '';\n\nreturn {\n  id: email.id,\n  from,\n  fromEmail: from.match(/<(.+?)>/)?.[1] || from,\n  subject,\n  body: cleanBody,\n  receivedAt: email.internalDate\n};"
+      },
+      "name": "Parse Email Content",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const email = $input.item.json;\n\nconst prompt = `Classify this email for automated triage.\n\n**From:** ${email.from}\n**Subject:** ${email.subject}\n**Body:** ${email.body.substring(0, 2000)}\n\nReturn JSON:\n{\n  \"category\": \"client|sales|internal|newsletter|receipt|notification|spam|other\",\n  \"priority\": \"urgent|high|normal|low\",\n  \"intent\": \"question|task_request|meeting_request|information|complaint|thank_you|follow_up|other\",\n  \"sentiment\": \"positive|neutral|negative|angry\",\n  \"actionable\": true/false,\n  \"suggestedAction\": \"respond|create_task|schedule_meeting|archive|forward_to_team|escalate|none\",\n  \"tags\": [\"tag1\", \"tag2\"],\n  \"summary\": \"One sentence summary\"\n}`;\n\nreturn {\n  prompt,\n  email\n};"
+      },
+      "name": "Build AI Classification Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "ai-call-wrapper"
+      },
+      "name": "Call AI for Classification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{"value1": "={{ $json.success }}", "value2": true}]
+        }
+      },
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const classification = $input.item.json.outputJson;\nconst email = $('Build AI Classification Prompt').item.json.email;\n\nreturn {\n  ...email,\n  category: classification.category,\n  priority: classification.priority,\n  intent: classification.intent,\n  sentiment: classification.sentiment,\n  actionable: classification.actionable,\n  suggestedAction: classification.suggestedAction,\n  tags: classification.tags,\n  summary: classification.summary\n};"
+      },
+      "name": "Extract Classification",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $json.priority }}",
+        "rules": {
+          "rules": [
+            {"output": "urgent", "conditions": {"conditions": [{"value1": "={{ $json.priority }}", "value2": "urgent"}]}},
+            {"output": "newsletter", "conditions": {"conditions": [{"value1": "={{ $json.category }}", "value2": "newsletter"}]}},
+            {"output": "question", "conditions": {"conditions": [{"value1": "={{ $json.intent }}", "value2": "question"}]}},
+            {"output": "task_request", "conditions": {"conditions": [{"value1": "={{ $json.intent }}", "value2": "task_request"}]}},
+            {"output": "default", "conditions": {"conditions": []}}
+          ]
+        }
+      },
+      "name": "Route by Priority",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1850, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Handle Urgent - Send Alert",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2050, 100]
+    },
+    {
+      "parameters": {
+        "operation": "addLabel",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["={{ $json.category }}", "priority-{{ $json.priority }}"],
+        "options": {
+          "removeLabelIds": ["INBOX"],
+          "markAsRead": true
+        }
+      },
+      "name": "Handle Newsletter - Archive",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 1,
+      "position": [2050, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const email = $input.item.json;\n\nconst draftPrompt = `Draft a professional response to:\n\n**From:** ${email.from}\n**Subject:** ${email.subject}\n**Body:** ${email.body}\n\nBe professional, concise, and helpful.`;\n\nreturn {\n  draftPrompt,\n  email\n};"
+      },
+      "name": "Handle Question - Build Draft",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const email = $input.item.json;\n\nreturn {\n  taskName: `Email request: ${email.subject}`,\n  taskDescription: `From: ${email.from}\\n\\nSummary: ${email.summary}\\n\\nEmail: https://mail.google.com/mail/u/0/#inbox/${email.id}`,\n  priority: email.priority === 'urgent' ? 'high' : 'normal',\n  tags: ['email-request'],\n  emailId: email.id\n};"
+      },
+      "name": "Handle Task - Create Task",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2050, 400]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "listId": "={{ $env.CLICKUP_TASK_LIST_ID }}",
+        "name": "={{ $json.taskName }}",
+        "additionalFields": {
+          "description": "={{ $json.taskDescription }}",
+          "priority": "={{ $json.priority === 'high' ? 1 : 3 }}"
+        }
+      },
+      "name": "Create Task in ClickUp",
+      "type": "n8n-nodes-base.clickUp",
+      "typeVersion": 1,
+      "position": [2250, 400]
+    },
+    {
+      "parameters": {
+        "operation": "addLabel",
+        "messageId": "={{ $json.id }}",
+        "labelIds": ["ai-triaged", "={{ $json.category }}", "priority-{{ $json.priority }}"],
+        "options": {
+          "markAsRead": "={{ $json.priority === 'low' || $json.category === 'newsletter' }}"
+        }
+      },
+      "name": "Apply Labels to All",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData"
+      },
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [2650, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "notification-dispatch"
+      },
+      "name": "Send Daily Summary",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [2850, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": "audit-log"
+      },
+      "name": "Log Completion",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [3050, 200]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {"main": [[{"node": "Fetch Unread Emails", "type": "main", "index": 0}]]},
+    "Fetch Unread Emails": {"main": [[{"node": "Emails Exist?", "type": "main", "index": 0}]]},
+    "Emails Exist?": {"main": [[{"node": "Parse Email Content", "type": "main", "index": 0}]]},
+    "Parse Email Content": {"main": [[{"node": "Build AI Classification Prompt", "type": "main", "index": 0}]]},
+    "Build AI Classification Prompt": {"main": [[{"node": "Call AI for Classification", "type": "main", "index": 0}]]},
+    "Call AI for Classification": {"main": [[{"node": "AI Success?", "type": "main", "index": 0}]]},
+    "AI Success?": {"main": [[{"node": "Extract Classification", "type": "main", "index": 0}]]},
+    "Extract Classification": {"main": [[{"node": "Route by Priority", "type": "main", "index": 0}]]},
+    "Route by Priority": {"main": [[{"node": "Handle Urgent - Send Alert", "type": "main", "index": 0}], [{"node": "Handle Newsletter - Archive", "type": "main", "index": 0}], [{"node": "Handle Question - Build Draft", "type": "main", "index": 0}], [{"node": "Handle Task - Create Task", "type": "main", "index": 0}], [{"node": "Apply Labels to All", "type": "main", "index": 0}]]},
+    "Handle Urgent - Send Alert": {"main": [[{"node": "Apply Labels to All", "type": "main", "index": 0}]]},
+    "Handle Newsletter - Archive": {"main": [[{"node": "Apply Labels to All", "type": "main", "index": 0}]]},
+    "Handle Question - Build Draft": {"main": [[{"node": "Apply Labels to All", "type": "main", "index": 0}]]},
+    "Handle Task - Create Task": {"main": [[{"node": "Create Task in ClickUp", "type": "main", "index": 0}]]},
+    "Create Task in ClickUp": {"main": [[{"node": "Apply Labels to All", "type": "main", "index": 0}]]},
+    "Apply Labels to All": {"main": [[{"node": "Aggregate Results", "type": "main", "index": 0}]]},
+    "Aggregate Results": {"main": [[{"node": "Send Daily Summary", "type": "main", "index": 0}]]},
+    "Send Daily Summary": {"main": [[{"node": "Log Completion", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1"
+}
